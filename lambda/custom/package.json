@@ -1,0 +1,19 @@
+{
+  "name": "clova-skill-award-2019",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "ask lambda upload"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^0.18.0",
+    "tslint": "^5.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^10.3.5",
+    "typescript": "^2.9.2"
+  }
+}
