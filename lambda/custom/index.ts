@@ -1,14 +1,24 @@
 "use strict";
 
 import axios, {AxiosRequestConfig} from "axios";
+import {DynamoDB} from "aws-sdk";
+import AWS = require("aws-sdk");
 
 // ------------------------------------------------------
 // 変数・定数定義
 // ------------------------------------------------------
 const util = require("util");
 const MESSAGE = require("./message");
-const POSTALCODE_TABLE = "ClothCheckPostalCode";
-const USERTEMPERATURE_TABLE = "ClothCheckTempForUser";
+const POSTALCODE_TABLE = "ClothCheckPostalCodeForUser";
+const USERTEMPERATURE_TABLE = "DayTempForUser";
+const COUNTRY = "JP";
+const REGION = "ap-northeast1";
+
+AWS.config.update({
+  region: REGION,
+});
+
+const dynamodb = new AWS.DynamoDB({apiVersion: "2012-08-10"});
 
 const enum STATE {
   INPUT = "input",
@@ -58,33 +68,85 @@ const ER_SUCCESS_MATCH = "ER_SUCCESS_MATCH";
 // ------------------------------------------------------
 
 /* LAMBDA SETUP */
-exports.handler = async (event: any, context: any) => {
+exports.handler = async (event: any, context: any, callback: any) => {
   console.log(JSON.stringify(event, null, 2));
 
   const events = event.events;
   for (let i = 0; i < events.length; i++) {
-    const eventType = events[i]['type'];
-    if (eventType == 'message') {
-      let data = events[i];
-      const replyToken = data.replyToken;
-      const message = data.message;
-      const text = message.text;
+    let data = events[i];
+    const replyToken = data.replyToken;
+    if (data['type'] == 'message') {
+      // 郵便番号の応答かどうかをチェック
+      const text = data.message.text as string;
+      if (text.match(/[0-9]{3}-[0-9]{4}|[0-9]{7}/)) {
+        const params: DynamoDB.Types.PutItemInput = {
+          TableName: POSTALCODE_TABLE,
+          Item: {
+            'id' : {S: data.source.userId},
+            'postalcode' : {S: text}
+          },
+        };
 
-      data = JSON.stringify({
-        replyToken: replyToken,
-        messages: [{type: "text", text: 'ん？なんだって？'}]
-      });
+        try {
+          await insertPostalCode(params);
+          data = JSON.stringify({
+            replyToken: replyToken,
+            messages: [{type: "text", text: `${text}で郵便番号情報を登録しました。`}],
+          });
+          const url = `/v2/bot/message/reply`;
+          await axios.post(url, data, lineAPIConfig);
+        } catch (e) {
+          console.log(e);
+          callback(e);
+        }
 
-      // 画像取得
-      if (message.type === "image") {
-        const url = `/v2/bot/message/${message.id}/content`;
-        const resp = await axios.get(url, lineAPIImageConfig);
-        console.log('image = ' + resp.toString());
+        callback("郵便番号登録完了");
       }
 
-      const url = `/v2/bot/message/reply`;
-      const resp = await axios.post(url, data, lineAPIConfig);
-      console.log(resp);
+      // ユーザの郵便番号を取得
+      // 見つからない場合は郵便番号を入力してもらうようにメッセージを返す
+      const params: DynamoDB.Types.GetItemInput = {
+        TableName: POSTALCODE_TABLE,
+        Key: {
+          "id": {
+            "S": data.source.userId,
+          }
+        }
+      };
+      let postal;
+      try {
+        postal = await getPostalCode(params);
+      } catch (e) {
+        console.log(e);
+      }
+
+      if (!postal) {
+        data = JSON.stringify({
+          replyToken: replyToken,
+          messages: [{type: "text", text: '郵便番号を教えてください（例：100-0004）'}],
+        });
+        const url = `/v2/bot/message/reply`;
+        const resp = await axios.post(url, data, lineAPIConfig);
+        console.log(resp);
+      } else {
+        const message = data.message;
+        const text = message.text;
+
+        data = JSON.stringify({
+          replyToken: replyToken,
+          messages: [{type: "text", text: 'ん？なんだって？'}]
+        });
+
+        // 画像取得
+        if (message.type === "image") {
+          const url = `/v2/bot/message/${message.id}/content`;
+          const resp = await axios.get(url, lineAPIImageConfig);
+        }
+
+        const url = `/v2/bot/message/reply`;
+        const resp = await axios.post(url, data, lineAPIConfig);
+        console.log(resp);
+      }
     }
   }
 
@@ -95,6 +157,34 @@ exports.handler = async (event: any, context: any) => {
   return response;
 };
 
+/**
+ *
+ * @param params
+ */
+const getPostalCode = async (params: DynamoDB.Types.GetItemInput) => {
+  dynamodb.getItem(params, function (err, data) {
+    if (err) {
+      console.log("Error", err);
+    } else {
+      console.log("Success", data.Item);
+      return data.Item;
+    }
+  });
+}
+
+/**
+ *
+ * @param params
+ */
+const insertPostalCode = async (params: DynamoDB.Types.PutItemInput) => {
+  dynamodb.putItem(params, function (err, data) {
+    if (err) {
+      console.log("Error", err);
+    } else {
+      console.log("Success");
+    }
+  });
+}
 
 
 // /* INTENT HANDLERS */
