@@ -1,4 +1,5 @@
 "use strict";
+
 import axios, {AxiosRequestConfig} from "axios";
 
 // ------------------------------------------------------
@@ -6,13 +7,16 @@ import axios, {AxiosRequestConfig} from "axios";
 // ------------------------------------------------------
 const util = require("util");
 const MESSAGE = require("./message");
-const TABLE_NAME = "DayTempForUser";
-const PERMISSIONS = ['read::alexa:device:all:address:country_and_postal_code'];
+const POSTALCODE_TABLE = "ClothCheckPostalCode";
+const USERTEMPERATURE_TABLE = "ClothCheckTempForUser";
 
 const enum STATE {
   INPUT = "input",
 }
 
+// ------------------------------------------------------
+// API定義
+// ------------------------------------------------------
 const config: AxiosRequestConfig = {
   method: 'get',
   baseURL: 'http://api.openweathermap.org/',
@@ -20,6 +24,31 @@ const config: AxiosRequestConfig = {
   responseType: 'json',
   validateStatus: (status: number) => status >= 200 && status < 300,
 };
+
+const lineAPIImageConfig: AxiosRequestConfig = {
+  method: "get",
+  baseURL: 'https://api.line.me',
+  timeout: 10000,
+  responseType: 'json',
+  headers: {
+    "Authorization": "Bearer " + process.env.ACCESSTOKEN // LINE Developersの「Channel Access Token」を使用
+  },
+  validateStatus: (status: number) => status >= 200 && status < 300,
+};
+
+const lineAPIConfig: AxiosRequestConfig = {
+  method: "post",
+  baseURL: 'https://api.line.me',
+  timeout: 10000,
+  responseType: 'json',
+  headers: {
+    "Content-type": "application/json; charset=UTF-8",
+    "Authorization": "Bearer " + process.env.ACCESSTOKEN // LINE Developersの「Channel Access Token」を使用
+  },
+  validateStatus: (status: number) => status >= 200 && status < 300,
+};
+
+
 /**
  * エンティティ解決時の成功コード
  * @type {string}
@@ -31,12 +60,42 @@ const ER_SUCCESS_MATCH = "ER_SUCCESS_MATCH";
 /* LAMBDA SETUP */
 exports.handler = async (event: any, context: any) => {
   console.log(JSON.stringify(event, null, 2));
+
+  const events = event.events;
+  for (let i = 0; i < events.length; i++) {
+    const eventType = events[i]['type'];
+    if (eventType == 'message') {
+      let data = events[i];
+      const replyToken = data.replyToken;
+      const message = data.message;
+      const text = message.text;
+
+      data = JSON.stringify({
+        replyToken: replyToken,
+        messages: [{type: "text", text: 'ん？なんだって？'}]
+      });
+
+      // 画像取得
+      if (message.type === "image") {
+        const url = `/v2/bot/message/${message.id}/content`;
+        const resp = await axios.get(url, lineAPIImageConfig);
+        console.log('image = ' + resp.toString());
+      }
+
+      const url = `/v2/bot/message/reply`;
+      const resp = await axios.post(url, data, lineAPIConfig);
+      console.log(resp);
+    }
+  }
+
   const response = {
     statusCode: 200,
-    body: JSON.stringify('Hello from Lambda!'),
+    body: JSON.stringify('OK'),
   };
   return response;
 };
+
+
 
 // /* INTENT HANDLERS */
 // const LaunchRequestHandler = {
