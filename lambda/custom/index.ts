@@ -13,6 +13,12 @@ const USERTEMPERATURE_TABLE = "ClothCheckTempForUser";
 const COUNTRYCODE = "JP";
 const REGION = "ap-northeast-1";
 
+const enum RESULT {
+  HOT = "あつい",
+  COLD = "さむい",
+  GOOD = "ちょうどいい"
+};
+
 const lineSDKConfig = {
   channelAccessToken: process.env.ACCESSTOKEN as string,
   channelSecret: process.env.CHANNEL_SECRET as string,
@@ -66,24 +72,27 @@ exports.handler = async (event: any, context: any, callback: any) => {
   for (let i = 0; i < events.length; i++) {
     let data = events[i];
     const replyToken = data.replyToken;
+
     if (data['type'] == 'message') {
       // 郵便番号の応答かどうかをチェック
       let text = data.message.text as string;
+      const userId = data.source.userId;
       if (text.length <= 8 && text.match(/[0-9]{3}-[0-9]{4}|[0-9]{7}/)) {
         if (!text.match(/-/)) {
           text = `${text.substr(0, 3)}-${text.substr(3, 4)}`;
         }
+
         const params = {
           TableName: POSTALCODE_TABLE,
           Item: {
-            'id': data.source.userId,
+            'id': userId,
             'postalCode': text
           },
         };
 
         // 郵便番号を登録
         try {
-          await insertPostalCode(params);
+          await insertRecord(params);
         } catch (err) {
           callback(err);
         }
@@ -102,7 +111,6 @@ exports.handler = async (event: any, context: any, callback: any) => {
 
       // ユーザの郵便番号を取得
       // 見つからない場合は郵便番号を入力してもらうようにメッセージを返す
-      const userId = data.source.userId;
       const params = {
         TableName: POSTALCODE_TABLE,
         Key: {
@@ -155,18 +163,18 @@ exports.handler = async (event: any, context: any, callback: any) => {
                 actions: [
                   {
                     "type": "postback",
-                    "label": "あつい",
-                    "data": "hot"
+                    "label": RESULT.HOT,
+                    "data": `${temperature}&${RESULT.HOT}`,
                   },
                   {
                     "type": "postback",
-                    "label": "さむい",
-                    "data": "cold"
+                    "label": RESULT.COLD,
+                    "data": `${temperature}&${RESULT.COLD}`,
                   },
                   {
                     "type": "postback",
-                    "label": "ちょうどいい",
-                    "data": "fit"
+                    "label": RESULT.GOOD,
+                    "data": `${temperature}&${RESULT.GOOD}`,
                   }
                 ]
               }
@@ -207,6 +215,40 @@ exports.handler = async (event: any, context: any, callback: any) => {
         statusCode: 200,
         body: JSON.stringify("OK"),
       };
+    } else if (data['type'] == 'postback') {
+      // DynamoDBにデータを送信
+      const userId = data.source.userId;
+      const temperature = data.postback.data.split("&")[0];
+      const result = data.postback.data.split("&")[1];
+
+      const params = {
+        TableName: USERTEMPERATURE_TABLE,
+        Item: {
+          'id': userId,
+          "temperature": parseInt(temperature),
+          result,
+        },
+      };
+
+      try {
+        await insertRecord(params);
+      } catch (err) {
+        callback(err);
+      }
+
+      try {
+        await lineClient.replyMessage(replyToken, {
+          type: "text",
+          text: `${temperature}度の感想は${result}で記録したよ。`,
+        });
+      } catch (err) {
+        callback(err);
+      }
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify("postal code register"),
+      };
     }
   }
 
@@ -215,7 +257,7 @@ exports.handler = async (event: any, context: any, callback: any) => {
     body: JSON.stringify('OK'),
   };
   return response;
-};
+}
 
 /**
  *
@@ -236,7 +278,7 @@ const getPostalCode = async (params: DocumentClient.GetItemInput): Promise<strin
  *
  * @param params
  */
-const insertPostalCode = async (params: DocumentClient.PutItemInput): Promise<boolean> => {
+const insertRecord = async (params: DocumentClient.PutItemInput): Promise<boolean> => {
   try {
     await documentClient.put(params).promise();
     console.log("Success put postalcode");
