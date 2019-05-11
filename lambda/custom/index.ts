@@ -10,7 +10,7 @@ import {DocumentClient} from "aws-sdk/clients/dynamodb";
 const AWS = require("aws-sdk");
 const POSTALCODE_TABLE = "ClothCheckPostalCodeForUser";
 const USERTEMPERATURE_TABLE = "ClothCheckTempForUser";
-const COUNTRY = "JP";
+const COUNTRYCODE = "JP";
 const REGION = "ap-northeast-1";
 
 const lineSDKConfig = {
@@ -68,8 +68,11 @@ exports.handler = async (event: any, context: any, callback: any) => {
     const replyToken = data.replyToken;
     if (data['type'] == 'message') {
       // 郵便番号の応答かどうかをチェック
-      const text = data.message.text as string;
-      if (text.match(/[0-9]{3}-[0-9]{4}|[0-9]{7}/)) {
+      let text = data.message.text as string;
+      if (text.length <= 8 && text.match(/[0-9]{3}-[0-9]{4}|[0-9]{7}/)) {
+        if (!text.match(/-/)) {
+          text = `${text.substr(0, 3)}-${text.substr(3, 4)}`;
+        }
         const params = {
           TableName: POSTALCODE_TABLE,
           Item: {
@@ -78,24 +81,17 @@ exports.handler = async (event: any, context: any, callback: any) => {
           },
         };
 
+        // 郵便番号を登録
         try {
           await insertPostalCode(params);
-        } catch (e) {
-          console.log("Dynamo Error ", e);
-          return {
-            statusCode: 500,
-            body: JSON.stringify("postal code dynamodb put error"),
-          };
+        } catch (err) {
+          callback(err);
         }
 
         try {
           await lineClient.replyMessage(replyToken, {type: "text", text: `${text}で郵便番号情報を登録しました。`});
-        } catch (e) {
-          console.log("line Error ", e);
-          return {
-            statusCode: 500,
-            body: JSON.stringify("line replay error"),
-          };
+        } catch (err) {
+          callback(err);
         }
 
         return {
@@ -106,30 +102,85 @@ exports.handler = async (event: any, context: any, callback: any) => {
 
       // ユーザの郵便番号を取得
       // 見つからない場合は郵便番号を入力してもらうようにメッセージを返す
+      const userId = data.source.userId;
       const params = {
         TableName: POSTALCODE_TABLE,
         Key: {
-          "id": {
-            "S": data.source.userId,
-          }
+          "id": userId,
         }
       };
-      let postal;
+      let postalCode;
       try {
-        postal = await getPostalCode(params);
-      } catch (e) {
-        return {
-          statusCode: 400,
-          body: JSON.stringify("postal code dynamodb get error"),
-        };
+        postalCode = await getPostalCode(params);
+      } catch (err) {
+        callback(err);
       }
 
-      if (!postal) {
+      if (!postalCode) {
         await lineClient.replyMessage(replyToken, {
           type: "text",
           text: '郵便番号を教えてください（例：100-0004）',
         });
       } else {
+        // 登録位置情報から天気情報を取得
+        const addressInfo = `${postalCode},${COUNTRYCODE}`;
+        const url = `/data/2.5/weather?units=metric&zip=${addressInfo}&APPID=${process.env.WEATHER_APIKEY}`;
+        let weather, temperature;
+        try {
+          weather = await axios.get(url, config);
+          temperature = Math.floor(weather.data.main.temp);
+          // await lineClient.replyMessage(replyToken, {
+          //   type: "text",
+          //   text: `${temperature}度の感想は${text}で記録したよ。`,
+          // });
+
+          // 登録済みでない気温の場合、登録してもらうように促す
+          const isSet = await isSetTemperature({
+            TableName: USERTEMPERATURE_TABLE,
+            KeyConditionExpression: 'id = :hkey and temperature > :rkey',
+            ExpressionAttributeValues: {
+              ':hkey': userId,
+              ':rkey': temperature
+            },
+          });
+
+          console.log(isSet);
+          if (!isSet) {
+            await lineClient.replyMessage(replyToken, {
+              type: "template",
+              altText: `今日は${temperature}でしたが気温はどうでしたか？`,
+              template: {
+                type: "buttons",
+                text: `今日は${temperature}でしたが気温はどうでしたか？`,
+                actions: [
+                  {
+                    "type": "postback",
+                    "label": "あつい",
+                    "data": "hot"
+                  },
+                  {
+                    "type": "postback",
+                    "label": "さむい",
+                    "data": "cold"
+                  },
+                  {
+                    "type": "postback",
+                    "label": "ちょうどいい",
+                    "data": "fit"
+                  }
+                ]
+              }
+            })
+
+            return {
+              statusCode: 200,
+              body: JSON.stringify("postal code register"),
+            };
+          }
+        } catch (e) {
+          callback(e);
+        }
+
         const message = data.message;
         const text = message.text;
 
@@ -149,6 +200,13 @@ exports.handler = async (event: any, context: any, callback: any) => {
           text: 'ほげほげ',
         });
       }
+
+      callback(null, "OK, Lambda");
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify("OK"),
+      };
     }
   }
 
@@ -163,32 +221,42 @@ exports.handler = async (event: any, context: any, callback: any) => {
  *
  * @param params
  */
-const getPostalCode = async (params: DocumentClient.GetItemInput) => {
-  // @ts-ignore
-  documentClient.get(params, function (err, data) {
-    if (err) {
-      console.log("Error", err);
-    } else {
-      console.log("Success", data.Item);
-      return data.Item;
-    }
-  });
+const getPostalCode = async (params: DocumentClient.GetItemInput): Promise<string | null> => {
+  try {
+    const data = await documentClient.get(params).promise();
+    console.log("Success get postalcode", data.Item);
+    return data.Item.postalCode;
+  } catch (err) {
+    console.log("Error", err);
+    return null;
+  }
 }
 
 /**
  *
  * @param params
  */
-const insertPostalCode = async (params: DocumentClient.PutItemInput) => {
-  console.log(params);
-  // @ts-ignore
-  documentClient.put(params, function (err, data) {
-    if (err) {
-      console.log("Error", err);
-    } else {
-      console.log("Success ", data);
-      return "Success";
-    }
-  });
+const insertPostalCode = async (params: DocumentClient.PutItemInput): Promise<boolean> => {
+  try {
+    await documentClient.put(params).promise();
+    console.log("Success put postalcode");
+    return true;
+  } catch (err) {
+    console.log("Error", err);
+    return false;
+  }
 }
 
+/**
+ *
+ * @param params
+ */
+const isSetTemperature = async (params: DocumentClient.QueryInput): Promise<boolean> => {
+  try {
+    const data = await documentClient.query(params).promise();
+    return data.Count > 0;
+  } catch (err) {
+    console.log("Error", err);
+  }
+  return false;
+}
