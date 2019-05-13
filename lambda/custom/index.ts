@@ -4,6 +4,7 @@ import axios, {AxiosRequestConfig} from "axios";
 import * as line from '@line/bot-sdk';
 import {DocumentClient} from "aws-sdk/clients/dynamodb";
 import {message} from "aws-sdk/clients/sns";
+import S3 = require("aws-sdk/clients/s3");
 
 // ------------------------------------------------------
 // 変数・定数定義
@@ -33,6 +34,7 @@ AWS.config.update({
   region: REGION,
 });
 
+const dynamodb = new AWS.DynamoDB({apiVersion: 'latest'});
 const documentClient = new AWS.DynamoDB.DocumentClient({apiVersion: 'latest'});
 const s3Client = new AWS.S3({apiVersion: 'latest'});
 
@@ -98,7 +100,7 @@ exports.handler = async (event: any, context: any, callback: any) => {
 
     // ユーザの郵便番号を取得
     // 見つからない場合は郵便番号を入力してもらうようにメッセージを返す
-    let postalCode, temperature;
+    let postalCode, temperature = 0;
     try {
       postalCode = await getPostalCode({
         TableName: POSTALCODE_TABLE,
@@ -113,46 +115,61 @@ exports.handler = async (event: any, context: any, callback: any) => {
       const weather = await axios.get(url, config);
       temperature = Math.floor(weather.data.main.temp);
     } catch (err) {
-      callback(err);
+      throw err;
     }
 
     // 画像取得
     const stream = await lineClient.getMessageContent(data.message.id);
     const filename = `${temperature}${userId}.png`;
     const image: any[] = [];
+
     stream.on('data', (chunk) => {
       image.push(new Buffer(chunk));
     }).on('error', (err) => {
       console.error("[Error] image stream", err);
-      callback(err);
-    }).on('end', () => {
+      throw err;
+    }).on('end', async () => {
       const s3Params = {
         Body: Buffer.concat(image),
         Bucket: BUCKET_NAME,
         Key: filename
       };
       putS3Object(s3Params);
+      // ここでconsole.log書いても何も出力されない！！！
+
+      // ここでdynamo updateの処理を書いても実行されないように見える！！
+      // CAUTION!!!
+      //       const dynamoUpdateResponse = await updateRecord(updateParams);
+      //       console.log("dynamo update w/ image", dynamoUpdateResponse);
+      // 上記だとUpdateは実行はされるが
+      // ログ出力はされなかった
+
+      // 画像更新
+      const updateParams = {
+        TableName: USERTEMPERATURE_TABLE,
+        Key: {
+          id: userId,
+          temperature: temperature,
+        },
+        UpdateExpression: "set #image = :image, #timestamp = :timestamp",
+        ExpressionAttributeNames: {
+          "#timestamp": "timestamp",
+          "#image": "image",
+        },
+        ExpressionAttributeValues: {
+          ":image": filename,
+          ":timestamp": `${timestamp.toLocaleDateString("ja")} ${timestamp.toLocaleTimeString("ja")}`
+        }
+      };
+      const dynamoUpdateResponse = await updateRecord(updateParams);
+      console.log("dynamo update w/ image", dynamoUpdateResponse);
+
     });
 
     await lineClient.replyMessage(replyToken, {
       type: "text",
       text: '画像の登録が完了しました。',
     });
-
-    // 画像更新
-    const updateParams = {
-      TableName: USERTEMPERATURE_TABLE,
-      Key: {
-        id: userId,
-        temperature,
-      },
-      UpdateExpression: "set image = :image, timestamp := :timestamp",
-      ExpressionAttributeValues: {
-        ":image": filename,
-        ":timestamp": `${timestamp.toLocaleDateString("ja")} ${timestamp.toLocaleTimeString("ja")}`
-      }
-    };
-    await updateRecord(updateParams);
   }
 
   /**
@@ -183,19 +200,14 @@ exports.handler = async (event: any, context: any, callback: any) => {
       try {
         await insertRecord(params);
       } catch (err) {
-        callback(err);
+        throw err;
       }
 
       try {
         await lineClient.replyMessage(replyToken, {type: "text", text: `${text}で郵便番号情報を登録しました。`});
       } catch (err) {
-        callback(err);
+        throw err;
       }
-
-      return {
-        statusCode: 200,
-        body: JSON.stringify("postal code register"),
-      };
     }
 
     // ユーザの郵便番号を取得
@@ -210,7 +222,7 @@ exports.handler = async (event: any, context: any, callback: any) => {
     try {
       postalCode = await getPostalCode(params);
     } catch (err) {
-      callback(err);
+      throw err;
     }
 
     if (!postalCode) {
@@ -231,7 +243,7 @@ exports.handler = async (event: any, context: any, callback: any) => {
         // 登録位置情報から天気情報を取得
         weather = await axios.get(url, config);
         temperature = Math.floor(weather.data.main.temp);
-        const isSet = await isSetTemperature({
+        const temperatureSearchResp = await isSetTemperature({
           TableName: USERTEMPERATURE_TABLE,
           KeyConditionExpression: 'id = :hkey and temperature = :rkey',
           ExpressionAttributeValues: {
@@ -240,8 +252,9 @@ exports.handler = async (event: any, context: any, callback: any) => {
           },
         });
 
-        // 登録済みでない気温の場合、登録してもらうように促す
-        if (!isSet) {
+        // 未登録の気温の場合、登録してもらうように促す
+        // @ts-ignore
+        if (temperatureSearchResp.Count === 0 || (!temperatureSearchResp.Items[0].timestamp)) {
           await lineClient.replyMessage(replyToken, {
             type: "template",
             altText: `今日は${temperature}でしたが気温はどうでしたか？`,
@@ -279,17 +292,9 @@ exports.handler = async (event: any, context: any, callback: any) => {
           });
         }
       } catch (e) {
-        callback(e);
+        throw e;
       }
     }
-
-    callback(null, "OK, Lambda");
-
-    return {
-      statusCode: 200,
-      body: JSON.stringify("OK"),
-    };
-    return data;
   }
 
   /**
@@ -304,20 +309,31 @@ exports.handler = async (event: any, context: any, callback: any) => {
     const result = data.postback.data.split("&")[1];
 
     const timestamp = new Date();
-    const params = {
+
+    // 画像更新
+    const updateParams = {
       TableName: USERTEMPERATURE_TABLE,
-      Item: {
+      Key: {
         'id': userId,
         "temperature": parseInt(temperature),
-        result,
-        'timestamp': `${timestamp.toLocaleDateString("ja")} ${timestamp.toLocaleTimeString("ja")}`,
+      },
+      AttributeUpdates: {
+        result: {
+          Action: "PUT",
+          Value: result,
+        },
+        timestamp: {
+          Action: "PUT",
+          Value: `${timestamp.toLocaleDateString("ja")} ${timestamp.toLocaleTimeString("ja")}`,
+        }
       },
     };
 
     try {
-      await insertRecord(params);
+      // 気温の感想情報を登録
+      await updateRecord(updateParams);
     } catch (err) {
-      callback(err);
+      throw err;
     }
 
     try {
@@ -326,7 +342,7 @@ exports.handler = async (event: any, context: any, callback: any) => {
         text: `${temperature}度の感想は${result}で記録したよ。あわせて今日の服装をアップロードしてね。`,
       });
     } catch (err) {
-      callback(err);
+      throw err;
     }
   }
 };
@@ -364,10 +380,9 @@ const insertRecord = async (params: DocumentClient.PutItemInput): Promise<boolea
  *
  * @param params
  */
-const updateRecord = async (params: DocumentClient.UpdateItemInput): Promise<boolean> => {
+const updateRecord = async (params: DocumentClient.UpdateItemInput): Promise<DocumentClient.UpdateItemOutput> => {
   try {
-    await documentClient.update(params).promise();
-    return true;
+    return await documentClient.update(params).promise();
   } catch (err) {
     console.log("Error", err);
     throw err;
@@ -379,11 +394,11 @@ const updateRecord = async (params: DocumentClient.UpdateItemInput): Promise<boo
  *
  * @param params
  */
-const isSetTemperature = async (params: DocumentClient.QueryInput): Promise<boolean> => {
+const isSetTemperature = async (params: DocumentClient.QueryInput): Promise<DocumentClient.QueryOutput> => {
   try {
     const data = await documentClient.query(params).promise();
     console.log(data);
-    return data.Count > 0;
+    return data;
   } catch (err) {
     console.log("Error", err);
     throw err;
@@ -394,9 +409,9 @@ const isSetTemperature = async (params: DocumentClient.QueryInput): Promise<bool
  *
  * @param params
  */
-const putS3Object = async (params: any): Promise<void> => {
+const putS3Object = async (params: any): Promise<S3.Types.PutObjectOutput> => {
   try {
-    await s3Client.putObject(params).promise();
+    return await s3Client.putObject(params).promise();
   } catch (err) {
     console.log("Error", err);
     throw err;
