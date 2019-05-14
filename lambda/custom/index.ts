@@ -35,7 +35,6 @@ AWS.config.update({
   region: REGION,
 });
 
-const dynamodb = new AWS.DynamoDB({apiVersion: 'latest'});
 const documentClient = new AWS.DynamoDB.DocumentClient({apiVersion: 'latest'});
 const s3Client = new AWS.S3({apiVersion: 'latest'});
 
@@ -47,17 +46,6 @@ const config: AxiosRequestConfig = {
   baseURL: 'http://api.openweathermap.org/',
   timeout: 10000,
   responseType: 'json',
-  validateStatus: (status: number) => status >= 200 && status < 300,
-};
-
-const lineAPIImageConfig: AxiosRequestConfig = {
-  method: "get",
-  baseURL: 'https://api.line.me',
-  timeout: 10000,
-  responseType: 'json',
-  headers: {
-    "Authorization": "Bearer " + process.env.ACCESSTOKEN // LINE Developersの「Channel Access Token」を使用
-  },
   validateStatus: (status: number) => status >= 200 && status < 300,
 };
 
