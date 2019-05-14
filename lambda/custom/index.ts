@@ -4,6 +4,7 @@ import axios, {AxiosRequestConfig} from "axios";
 import * as line from '@line/bot-sdk';
 import {DocumentClient} from "aws-sdk/clients/dynamodb";
 import {message} from "aws-sdk/clients/sns";
+import {quickReply} from "./response";
 import S3 = require("aws-sdk/clients/s3");
 
 // ------------------------------------------------------
@@ -120,7 +121,7 @@ exports.handler = async (event: any, context: any, callback: any) => {
 
     // 画像取得
     const stream = await lineClient.getMessageContent(data.message.id);
-    const filename = `${temperature}${userId}.png`;
+    const filename = `${temperature}${userId}.jpg`;
     const image: any[] = [];
 
     stream.on('data', (chunk) => {
@@ -281,15 +282,58 @@ exports.handler = async (event: any, context: any, callback: any) => {
             }
           });
 
+          return;
 
         } else {
-          const message = data.message;
-          const text = message.text;
+          //
+          const item = temperatureSearchResp.Items![0];
 
-          await lineClient.replyMessage(replyToken, {
+          if (!item.image) {
+            await lineClient.replyMessage(replyToken, {
+              type: "text",
+              text: 'この気温の時の感想は登録済みです。より良い記録のために服装をアップロードしてください。',
+              quickReply,
+            });
+
+            return;
+          }
+
+          await lineClient.replyMessage(replyToken, [{
             type: "text",
-            text: 'この気温の時の感想は登録済みです。更新したい場合、感想と新しい画像をアップロードしてください。',
-          });
+            text: `${temperature}度の時の感想は${item.result}です。更新したい場合、感想と新しい画像をアップロードしてください。`,
+          }, {
+            type: "image",
+            // originalContentUrl: `${process.env.S3_PATH}/${item.image}`,
+            // previewImageUrl: "https://example.com/preview.jpg",
+            originalContentUrl: `${process.env.S3_PATH}/sample.jpg`,
+            previewImageUrl: `${process.env.S3_PATH}/sample-preview.jpg`,
+
+          },
+            {
+              type: "template",
+              altText: `感想を更新したい場合は下記から選択してください。`,
+              template: {
+                type: "buttons",
+                text: `感想を更新したい場合は下記から選択してください。`,
+                actions: [
+                  {
+                    "type": "postback",
+                    "label": RESULT.HOT,
+                    "data": `${temperature}&${RESULT.HOT}`,
+                  },
+                  {
+                    "type": "postback",
+                    "label": RESULT.COLD,
+                    "data": `${temperature}&${RESULT.COLD}`,
+                  },
+                  {
+                    "type": "postback",
+                    "label": RESULT.GOOD,
+                    "data": `${temperature}&${RESULT.GOOD}`,
+                  }
+                ]
+              }
+            }]);
         }
       } catch (e) {
         throw e;
@@ -337,10 +381,13 @@ exports.handler = async (event: any, context: any, callback: any) => {
     }
 
     try {
-      await lineClient.replyMessage(replyToken, {
-        type: "text",
-        text: `${temperature}度の感想は${result}で記録したよ。あわせて今日の服装をアップロードしてね。`,
-      });
+      await lineClient.replyMessage(replyToken, [
+        {
+          type: "text",
+          text: `${temperature}度の感想は${result}で記録したよ。あわせて今日の服装をアップロードしてね。`,
+          quickReply
+        }
+      ]);
     } catch (err) {
       throw err;
     }
