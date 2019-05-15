@@ -295,7 +295,6 @@ exports.handler = async (event: any, context: any, callback: any) => {
             // previewImageUrl: "https://example.com/preview.jpg",
             originalContentUrl: `${process.env.S3_PATH}/sample.jpg`,
             previewImageUrl: `${process.env.S3_PATH}/sample-preview.jpg`,
-
           },
             {
               type: "template",
@@ -342,7 +341,7 @@ exports.handler = async (event: any, context: any, callback: any) => {
 
     const timestamp = new Date();
 
-    // 画像更新
+    // 気温感想情報更新パラメータ
     const updateParams = {
       TableName: USERTEMPERATURE_TABLE,
       Key: {
