@@ -15,7 +15,6 @@ const POSTALCODE_TABLE = "ClothCheckPostalCodeForUser";
 const USERTEMPERATURE_TABLE = "ClothCheckTempForUser";
 const COUNTRYCODE = "JP";
 const REGION = "ap-northeast-1";
-const BUCKET_NAME = "cloth-check-bucket";
 
 const enum RESULT {
   HOT = "あつい",
@@ -44,6 +43,14 @@ const s3Client = new AWS.S3({apiVersion: 'latest'});
 const config: AxiosRequestConfig = {
   method: 'get',
   baseURL: 'http://api.openweathermap.org/',
+  timeout: 10000,
+  responseType: 'json',
+  validateStatus: (status: number) => status >= 200 && status < 300,
+};
+
+const bitlyConfig: AxiosRequestConfig = {
+  method: 'get',
+  baseURL: 'https://api-ssl.bitly.com/',
   timeout: 10000,
   responseType: 'json',
   validateStatus: (status: number) => status >= 200 && status < 300,
@@ -118,9 +125,10 @@ exports.handler = async (event: any, context: any, callback: any) => {
       console.error("[Error] image stream", err);
       throw err;
     }).on('end', async () => {
+      const im = Buffer.concat(image);
       const s3Params = {
-        Body: Buffer.concat(image),
-        Bucket: BUCKET_NAME,
+        Body: im,
+        Bucket: process.env.BUCKET_NAME,
         Key: filename
       };
       putS3Object(s3Params);
@@ -286,22 +294,45 @@ exports.handler = async (event: any, context: any, callback: any) => {
             return;
           }
 
+          const params = {
+            Bucket: process.env.RESIZED_BUCKET_NAME,
+            Key: item.image,
+            Expires: 360
+          };
+          const paramsPreview = {
+            Bucket: process.env.RESIZED_BUCKET_NAME,
+            Key: `preview_${item.image}`,
+            Expires: 360
+          };
+
+          const originalContentUrl = `${process.env.S3_PATH}/${params.Bucket}/${params.Key}`;
+          const previewImageUrl = `${process.env.S3_PATH}/${paramsPreview.Bucket}/${paramsPreview.Key}`;
+
+          // Messaging APIのURL仕様の最大文字数が１，０００文字であり、
+          // ギリギリ１０００文字を超えている・・・；；
+          // TODO 短縮URL処理
+          // const bitly4Url = `/v3/shorten?access_token=${process.env.BITLY_ACCESSTOKEN}&longUrl=${process.env.s3_PATH}/${params.Key}`;
+          // const bitly4PreviewUrl = `/v3/shorten?access_token=${process.env.BITLY_ACCESSTOKEN}&longUrl=${process.env.s3_PATH}/${paramsPreview.Key}`;;
+          //
+          // // 登録位置情報から天気情報を取得
+          // const weather = await axios.get(bitly4Url, bitlyConfig);
+          //
+          // const originalContentUrl = s3Client.getSignedUrl('getObject', params);
+          // const previewImageUrl = s3Client.getSignedUrl('getObject', paramsPreview);
+          //
+          //
+          console.log('The URL is', originalContentUrl); // expires in 60 seconds
+          console.log('The preview URL is', previewImageUrl); // expires in 60 seconds
+
           await lineClient.replyMessage(replyToken, [{
-            type: "text",
-            text: `${temperature}度の時の感想は${item.result}です。更新したい場合、感想と新しい画像をアップロードしてください。`,
-          }, {
-            type: "image",
-            // originalContentUrl: `${process.env.S3_PATH}/${item.image}`,
-            // previewImageUrl: "https://example.com/preview.jpg",
-            originalContentUrl: `${process.env.S3_PATH}/sample.jpg`,
-            previewImageUrl: `${process.env.S3_PATH}/sample-preview.jpg`,
+            type: "image", originalContentUrl, previewImageUrl,
           },
             {
               type: "template",
-              altText: `感想を更新したい場合は下記から選択してください。`,
+              altText: `${temperature}度の時の感想は${item.result}で、上の服装でした。更新したい場合、感想と新しい画像をアップロードしてください。`,
               template: {
                 type: "buttons",
-                text: `感想を更新したい場合は下記から選択してください。`,
+                text: `${temperature}度の時の感想は${item.result}で、上の服装でした。更新したい場合、感想と新しい画像をアップロードしてください。`,
                 actions: [
                   {
                     "type": "postback",
